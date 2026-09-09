@@ -27,13 +27,13 @@ int main(void) {
         if (last_btn_state == 0 && current_btn_state == 1) {
             led_state = !led_state; // Đảo trạng thái LED
             if (led_state) {
-                GPIOA_ODR |= (1 << 7);   // Bật LED tại PA7
+                GPIOA_ODR |= (1 << 7);   
             } else {
-                GPIOA_ODR &= ~(1 << 7);  // Tắt LED tại PA7
+                GPIOA_ODR &= ~(1 << 7); 
             }
         }
 
         last_btn_state = current_btn_state;
-        delay(50000); // Chống dội phím đơn giản (debounce)
+        delay(50000); 
     }
 }

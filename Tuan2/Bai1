@@ -1,0 +1,66 @@
+#include "stm32f1xx.h"
+
+
+#define MA_LOP  "01"
+#define MA_NHOM "10"
+
+#define MAX_BUFFER_SIZE 100
+
+
+char rx_buffer[MAX_BUFFER_SIZE];
+uint8_t rx_index = 0;
+
+
+void UART1_Init(void) {
+   
+    RCC->APB2ENR |= (1 << 2) | (1 << 14); 
+
+    GPIOA->CRH &= 0xFFFFF00F; 
+    GPIOA->CRH |= 0x000004B0; 
+
+    USART1->BRR = 0x341;
+  
+    USART1->CR1 |= (1 << 13) | (1 << 3) | (1 << 2); 
+}
+
+void UART1_SendChar(char c) {
+    while(!(USART1->SR & (1 << 7)));
+    USART1->DR = c;
+}
+
+void UART1_SendString(char *str) {
+    while(*str) {
+        UART1_SendChar(*str++);
+    }
+}
+
+int main(void) {
+    UART1_Init();    
+   
+    UART1_SendString("\033[2J\033[H"); 
+
+    while(1) {
+        if (USART1->SR & (1 << 5)) {
+            char received_char = USART1->DR; 
+           
+            if (rx_index < MAX_BUFFER_SIZE - 1) {
+                rx_buffer[rx_index] = received_char;
+                rx_index++;
+            }
+         
+            if (received_char == '!') { 
+                rx_buffer[rx_index] = '\0';
+              
+                UART1_SendString(MA_LOP);
+                UART1_SendString(MA_NHOM);
+                UART1_SendString(": ");
+                UART1_SendString(rx_buffer);
+               
+                UART1_SendChar('\n');
+                UART1_SendChar('\r');
+                
+                rx_index = 0;
+            }
+        }
+    }
+}

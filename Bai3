@@ -1,0 +1,127 @@
+#include "stm32f1xx.h"
+
+// Thông tin định danh
+#define PREFIX "0110:BTN:"
+
+// Bộ đệm chứa chuỗi dữ liệu để DMA tự động lấy và gửi đi
+char dma_tx_buffer[50];
+uint32_t button_count;
+
+// ================= CẤU HÌNH NGOẠI VI =================
+void System_Init(void) {
+    // 1. Cấp xung nhịp cho GPIOA, USART1 và DMA1
+    RCC->APB2ENR |= (1 << 2) | (1 << 14); // GPIOA, USART1
+    RCC->AHBENR  |= (1 << 0);             // DMA1
+
+    // 2. Cấu hình Nút nhấn tại PA0 (Input Pull-up)
+    GPIOA->CRL &= ~(0x0000000F); 
+    GPIOA->CRL |=  (0x00000008); // Input with pull-up/pull-down
+    GPIOA->ODR |=  (1 << 0);     // Kích hoạt Pull-up (Bình thường mức 1, nhấn nút xuống mức 0)
+
+    // 3. Cấu hình chân UART (PA9 là TX)
+    GPIOA->CRH &= ~(0x000000F0);
+    GPIOA->CRH |=  (0x000000B0); // PA9: Alternate function push-pull
+
+    // 4. Cấu hình USART1 (Baudrate 9600)
+    USART1->BRR = 0x341;
+    USART1->CR3 |= (1 << 7); // Kích hoạt chế độ DMA cho bộ phát (DMAT)
+    USART1->CR1 |= (1 << 13) | (1 << 3); // Bật USART1, bật Transmitter
+
+    // 5. Cấu hình DMA1 Channel 4 (Dành riêng cho USART1_TX)
+    DMA1_Channel4->CPAR = (uint32_t)&(USART1->DR); // Địa chỉ ngoại vi (thanh ghi dữ liệu UART)
+    // DIR = 1 (Đọc từ bộ nhớ ra ngoại vi)
+    // MINC = 1 (Tự động tăng địa chỉ bộ nhớ sau mỗi byte)
+    // PINC = 0 (Không tăng địa chỉ ngoại vi)
+    DMA1_Channel4->CCR = (1 << 4) | (1 << 7); 
+}
+
+// ================= HÀM XỬ LÝ CHUỖI VÀ DMA =================
+
+// Hàm đóng gói chuỗi (không dùng thư viện ngoài)
+uint16_t Format_Message(uint32_t count) {
+    uint16_t idx = 0;
+    
+    // Đưa tiền tố "0110:BTN:" vào buffer
+    char prefix[] = PREFIX;
+    for (int i = 0; prefix[i] != '\0'; i++) {
+        dma_tx_buffer[idx++] = prefix[i];
+    }
+    
+    // Chuyển đổi số count thành chuỗi và đưa vào buffer
+    char num_str[10];
+    int num_idx = 0;
+    if (count == 0) {
+        num_str[num_idx++] = '0';
+    } else {
+        uint32_t temp = count;
+        while (temp > 0) {
+            num_str[num_idx++] = (temp % 10) + '0';
+            temp /= 10;
+        }
+    }
+    // Ghi số vào buffer theo chiều xuôi
+    for (int i = num_idx - 1; i >= 0; i--) {
+        dma_tx_buffer[idx++] = num_str[i];
+    }
+    
+    // Thêm ký tự kết thúc \n\r theo yêu cầu đề bài
+    dma_tx_buffer[idx++] = '\n';
+    dma_tx_buffer[idx++] = '\r';
+    
+    return idx; // Trả về tổng chiều dài của bản tin
+}
+
+// Hàm kích hoạt DMA tự động gửi đi mà CPU không cần chờ
+void Send_via_DMA(uint16_t length) {
+    // Tắt DMA để cấu hình lại
+    DMA1_Channel4->CCR &= ~1; 
+    
+    // Xóa cờ báo hoàn thành truyền (Transfer Complete - TCIF4)
+    DMA1->IFCR |= (1 << 13); 
+    
+    // Cấp địa chỉ mảng bộ đệm và số lượng byte cần truyền
+    DMA1_Channel4->CMAR = (uint32_t)dma_tx_buffer;
+    DMA1_Channel4->CNDTR = length;
+    
+    // Bật DMA (Phần cứng tự động hút data từ buffer bắn ra UART)
+    DMA1_Channel4->CCR |= 1; 
+}
+
+// ================= HÀM MAIN =================
+int main(void) {
+    // Khởi tạo phần cứng
+    System_Init();
+
+    // Dọn dẹp RAM: Đảm bảo số đếm bắt đầu từ 0 và xóa sạch mảng buffer
+    button_count = 0; 
+    for(int i = 0; i < 50; i++) {
+        dma_tx_buffer[i] = 0;
+    }
+
+    uint8_t last_button_state = 1; // Trạng thái mặc định là nhả nút (Mức 1)
+
+    while (1) {
+        uint8_t current_button_state = (GPIOA->IDR & (1 << 0)) ? 1 : 0; // Đọc chân PA0
+
+        // Bắt sự kiện sườn xuống (từ nhả sang nhấn)
+        if (current_button_state == 0 && last_button_state == 1) {
+            // Chống dội phím (Debounce) cơ bản bằng phần mềm
+            for (volatile int i = 0; i < 20000; i++); 
+            
+            // Kiểm tra lại nếu vẫn đang nhấn
+            if ((GPIOA->IDR & (1 << 0)) == 0) {
+                button_count++; // Tăng số đếm
+                
+                // Đóng gói bản tin
+                uint16_t msg_length = Format_Message(button_count);
+                
+                // Kích hoạt DMA tự động truyền
+                Send_via_DMA(msg_length);
+                
+                // Chờ cho đến khi người dùng nhả nút ra hoàn toàn mới thoát vòng lặp
+                while ((GPIOA->IDR & (1 << 0)) == 0);
+            }
+        }
+        last_button_state = current_button_state;
+    }
+} 
